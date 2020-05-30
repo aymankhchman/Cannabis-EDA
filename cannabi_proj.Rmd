@@ -1,0 +1,246 @@
+---
+title: "Cannabis_P"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,fig.height = 8,fig.width = 10)
+```
+
+```{r , include=FALSE}
+library('tidyverse')
+library('tidytext')
+library("ggraph")
+library('igraph')
+library("extrafont")
+library("highcharter")
+fonts()
+theme_set(theme_minimal())
+
+```
+
+## Data loading +  Cleaning
+
+Available on <a>https://www.kaggle.com/kingburrito666/cannabis-strains</a>
+
+```{r }
+
+data <- read_csv(here::here(file = "cannabis.csv"))%>%
+        janitor::clean_names()
+
+```
+
+
+
+```{r}
+data_separate <- data %>%
+  separate_rows(effects, sep = ",")%>%
+  separate_rows(flavor , sep = ",")%>%
+  filter(!is.na(flavor))
+  
+```
+
+```{r}
+data_separate %>%
+  count(flavor,sort = TRUE)
+
+
+data_separate %>%
+  count(effects , sort = TRUE)
+```
+
+## What is the effect of flavor on the rating of the cannabis ? 
+```{r}
+
+data_separate %>%
+  group_by(flavor)%>%
+  summarise(avg_rating = mean(rating,na.rm = TRUE),
+            count = n()) %>%
+  arrange(desc(avg_rating)) %>%
+  ungroup()%>%
+  mutate(flavor = fct_reorder(flavor , avg_rating))%>%
+  ggplot(mapping = aes(x = flavor , y = avg_rating))+
+  geom_point(size = 1.5)+
+  coord_flip()+
+  labs(x = "Flavor" , y = "Average Rating" , title= "Influence of flavor on the rating")
+```
+
+
+## Let's try to do the same but with the effect of the strain , we will also look on the type of the strain cause certain customer expect different effect from certain type of strain
+
+
+```{r}
+library('tidytext')
+
+data_separate %>%
+  group_by(type,effects)%>%
+  summarise(avg_rating = mean(rating),
+            count = n())%>%
+  filter(count >= 100) %>%
+  arrange(desc(avg_rating)) %>%
+  ungroup() %>%
+  mutate(effects = reorder_within(effects , avg_rating,type,sep = ":"))%>%
+  ggplot(mapping = aes(x = effects , y = avg_rating,fill = factor(effects)))+
+  geom_col()+
+  coord_flip()+
+  facet_wrap(~type , scales = "free_y")+
+  expand_limits(y = 0)+
+  theme(legend.position = "") + 
+  scale_x_reordered()+
+  labs(y = "Average Rating" , x = "Effects",title  = "What most effects people like in certain type of cannabis")+
+  scale_y_continuous(breaks = seq(0,5,0.5))
+```
+
+
+
+
+
+```{r}
+
+
+
+features <- data_separate %>%
+  filter(flavor!= "Nonne" ,effects != "None")%>%
+  select(-c(description))%>%
+  mutate(effects = as.factor(effects),
+         flavor = as.factor(flavor),
+         type = as.factor(type),
+         value_1 = 1 ,
+         value_2 = 1,
+         value_3 = 1)%>%
+  pivot_wider(names_from = effects,values_from = value_1)%>%
+  pivot_wider(names_from = flavor , values_from = value_2)%>%
+  pivot_wider(names_from = type , values_from = value_3)%>%
+  unnest()%>%
+  mutate_if(is.double,function(x) ifelse(is.na(x),0,x))%>%
+  mutate_at(vars(-rating),as.factor)
+
+
+
+
+library("caret")
+
+lassoGrid <- expand.grid(alpha = 1, lambda = seq(0.001,0.1,by = 0.0005))
+model <- train(rating~.-strain, data = features , method = "glmnet",tuneGrid =lassoGrid ,metric  ="Rsquared")
+
+library('broom')
+
+
+tidy(model$finalModel) %>%
+  filter(term != "(Intercept)")%>%
+  mutate(term = fct_reorder(term , estimate,sum))%>%
+  ggplot(mapping = aes(x = term , y =estimate,fill = estimate > 0))+
+  geom_col()+
+  coord_flip()+
+  theme_minimal()
+
+colnames(features) <- make.names(colnames(features))
+
+```
+
+
+
+### Clustering Cannabis flavor and effect
+
+
+```{r}
+
+library("widyr")
+
+effect_cor <- data_separate%>%
+  mutate(flavor_effect = paste0(effects,"_",flavor))%>%
+  add_count(effects,sort = TRUE)%>%
+  filter(n >=300)%>%
+  pairwise_cor(effects,strain,sort = TRUE)
+
+```
+
+
+
+```{r}
+
+fill_color = c("#ffca28","#0288d1")
+
+effect_cor %>%
+  group_by(item1)%>%
+  top_n(10,correlation)%>%
+  ungroup()%>%
+  mutate(item2 = reorder_within(item2,correlation,item1))%>%
+  ggplot(mapping = aes(correlation,item2,fill = correlation > 0))+
+  geom_col()+
+  facet_wrap( ~item1,scales = "free_y")+
+  scale_y_reordered()+
+  labs(x = "" , y = "" , title = "Corrélation entre les effets du cannabis" , fill = "Corrélation positive ? ")+
+  theme_dark()+
+  theme(plot.background = element_rect(fill = "#34495e"),
+        legend.background = element_rect(fill = "#34495e"),
+        axis.text = element_text(colour = "#f0f3f4",family = "Arial Nova Light"),
+        legend.position = "",
+        plot.title = element_text(colour = "#f0f3f4",family = "Segoe UI",hjust = 0.45,size = 14))+
+  scale_fill_manual(values = fill_color)
+
+```
+
+
+  
+
+### Perform a PCA
+
+```{r}
+
+data_separate %>%
+  mutate(value = 1)%>%
+  widely_svd(effects,strain,value)%>%
+  filter(dimension <=6) %>%
+  group_by(dimension)%>%
+  top_n(10,abs(value))%>%
+  ungroup()%>%
+  mutate(effects = reorder_within(effects,value,dimension))%>%
+  ggplot(mapping = aes(value,effects,fill = value > 0))+
+  geom_col()+
+      scale_y_reordered()+
+  facet_wrap(~dimension,scales = "free")
+```
+
+
+
+
+### Let's do some interactive graph
+
+Inspired by a kaggler (Owen Ouyang)
+```{r}
+
+one <- data %>%
+  group_by(name = type , drilldown = type)%>%
+  summarise(y = n())%>%
+  arrange(desc(y))
+
+two <- data_separate %>%
+  group_by(type,effects)%>%
+  mutate(y = n())%>%
+  arrange(desc(y))%>%
+  group_by(name = type , id  =type) %>%
+  do(data = list_parse(
+    mutate(.,name = effects , drilldown =tolower(paste(type,effects,sep = ":")) )%>%
+    group_by(name,drilldown)%>%
+    summarise(y = n())%>%
+    select(name,y,drilldown) %>%
+    arrange(desc(y))
+  ))
+
+
+highchart() %>% 
+  hc_chart(type = 'bar') %>% 
+  hc_xAxis(type = "category",labels = list(style = list(color = "white"))) %>% 
+  hc_add_series(name = 'Nombre de cannabis', data = one,colorByPoint = TRUE) %>% 
+  hc_drilldown(
+    allowPointDrilldown = TRUE,
+    series =list_parse(two)
+  ) %>%
+  hc_legend(enabled = F) %>% 
+  hc_title(text = "Les effets de chaque type de cannabis")%>%
+  hc_add_theme(hc_theme_google())
+```
+
+
+
